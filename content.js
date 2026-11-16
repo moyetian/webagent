@@ -2451,6 +2451,11 @@
 
     const token = CONFIG.token || DEFAULT_BRIDGE_TOKEN;
     const cleanTool = toolName.toLowerCase().replace(/^localbridge_|^nexus_/, "");
+    const fail = (message) => {
+      isExecuting = false;
+      updateStatusUI(isConnected ? "online" : "offline", CURRENT_THEME.badgeTitle);
+      callback({ ok: false, error: message });
+    };
 
     // 智能参数自适应归一化 (兼容 AI 传来的 keyword/q/args 等变体)
     if (args && typeof args === "object") {
@@ -2791,112 +2796,177 @@
       sendToNexusControlCenter();
       return;
     } else if (
-      cleanTool.startsWith("browser_") ||
-      cleanTool === "snapshot" ||
-      cleanTool === "click" ||
-      cleanTool === "scroll" ||
-      cleanTool === "press_key" ||
-      cleanTool === "key" ||
-      cleanTool === "eval_js" ||
-      cleanTool === "page_eval" ||
-      cleanTool === "close_modal"
+      !/^localbridge_/i.test(toolName) && (
+        cleanTool.startsWith("browser_") ||
+        cleanTool === "snapshot" ||
+        cleanTool === "click" ||
+        cleanTool === "type" ||
+        cleanTool === "scroll" ||
+        cleanTool === "press_key" ||
+        cleanTool === "key" ||
+        cleanTool === "eval_js" ||
+        cleanTool === "page_eval" ||
+        cleanTool === "close_modal"
+      )
     ) {
-      // 6. 智能体浏览器自动化全套原子交互能力 (打开、快照、点击、滚动、打字、按键、代码执行、关闭弹窗)
-      mcpToolName = "nexus_browser";
-      if (cleanTool === "browser_press_key" || cleanTool === "browser_key" || cleanTool === "press_key" || cleanTool === "key") {
-        const key = args.key || args.keyName || "ArrowDown";
-        const code = args.code || key;
-        mcpArgs = {
-          action: "eval",
-          script: `
-            const evD = new KeyboardEvent('keydown', { key: '${key}', code: '${code}', bubbles: true, cancelable: true });
-            const evU = new KeyboardEvent('keyup', { key: '${key}', code: '${code}', bubbles: true, cancelable: true });
-            document.dispatchEvent(evD);
-            window.dispatchEvent(evD);
-            document.body && document.body.dispatchEvent(evD);
-            setTimeout(() => {
-              document.dispatchEvent(evU);
-              window.dispatchEvent(evU);
-              document.body && document.body.dispatchEvent(evU);
-            }, 50);
-            return { success: true, action: 'key_press', key: '${key}' };
-          `
-        };
-      } else if (cleanTool === "browser_close_modal" || cleanTool === "close_modal") {
-        mcpArgs = {
-          action: "eval",
-          script: `
-            const candidates = Array.from(document.querySelectorAll('div, span, button, svg, p, a')).filter(el => {
-              const cls = (el.className && typeof el.className === 'string') ? el.className : '';
-              const txt = (el.innerText || '').trim();
-              const aria = el.getAttribute('aria-label') || '';
-              return cls.includes('close') || cls.includes('qKr0RhiL') || cls.includes('YoNA2Hyj') || cls.includes('mask') || txt === '×' || txt === '✕' || aria.includes('关闭') || aria.includes('Close');
-            });
-            let closed = false;
-            if (candidates.length > 0) {
-              const target = candidates[0].closest('button') || candidates[0];
-              target.click();
-              closed = true;
-            }
-            // 兜底触发 Escape 按键
-            const esc = new KeyboardEvent('keydown', { key: 'Escape', code: 'Escape', keyCode: 27, bubbles: true });
-            document.dispatchEvent(esc);
-            window.dispatchEvent(esc);
-            return { success: true, action: 'close_modal', closed };
-          `
-        };
-      } else if (cleanTool === "browser_eval" || cleanTool === "eval_js" || cleanTool === "page_eval") {
-        mcpArgs = {
-          action: "eval",
-          script: args.script || args.js || args.code || ""
-        };
-      } else if (cleanTool === "browser_scroll" || cleanTool === "scroll") {
-        mcpArgs = {
-          action: "scroll",
-          direction: args.direction || "down",
-          amount: args.amount || args.distance || args.scroll || 600,
-          selector: args.selector
-        };
-      } else if (cleanTool === "browser_click" || cleanTool === "click") {
-        mcpArgs = {
-          action: "click",
-          mark: args.mark,
-          selector: args.selector,
-          text: args.text,
-          name: args.name,
-          role: args.role
-        };
-      } else if (cleanTool === "browser_type" || cleanTool === "type") {
-        mcpArgs = {
-          action: "type",
-          mark: args.mark,
-          selector: args.selector,
-          text: args.text ?? args.value ?? "",
-          press_enter: Boolean(args.press_enter || args.submit)
-        };
-      } else if (cleanTool === "browser_snapshot" || cleanTool === "snapshot") {
-        mcpArgs = {
-          action: "snapshot",
-          mode: args.mode || "compact"
-        };
-      } else {
-        // browser_open / navigate
-        mcpArgs = {
-          action: "navigate",
-          url: args.url || args.link || args.href || ""
-        };
+      // 6. 浏览器别名归一化 → 桥接真实暴露的 localbridge_browser_* 工具
+      // 真实的 localbridge_browser_* 工具不再在此拦截，统一走分支 7 的 nexus_execute_action。
+      if (cleanTool === "browser_eval" || cleanTool === "browser_evaluate" || cleanTool === "eval_js" || cleanTool === "page_eval") {
+        fail("当前 Nexus 桥接不提供浏览器内 JS 求值工具，请改用 localbridge_browser_snapshot / click / type / extract。");
+        return;
       }
+      const browserArgs = {};
+      let browserTarget = "";
+      if (cleanTool === "browser_press_key" || cleanTool === "browser_key" || cleanTool === "press_key" || cleanTool === "key") {
+        browserTarget = "localbridge_browser_key";
+        browserArgs.key = args.key || args.keyName || "Enter";
+        if (Array.isArray(args.modifiers)) browserArgs.modifiers = args.modifiers;
+      } else if (cleanTool === "browser_close_modal" || cleanTool === "close_modal") {
+        browserTarget = "localbridge_browser_key";
+        browserArgs.key = "Escape";
+      } else if (cleanTool === "browser_scroll" || cleanTool === "scroll") {
+        browserTarget = "localbridge_browser_scroll";
+        const amount = Math.abs(Number(args.amount || args.distance || args.scroll || 600)) || 600;
+        browserArgs.deltaY = String(args.direction || "down").toLowerCase() === "up" ? -amount : amount;
+        if (args.selector) browserArgs.selector = args.selector;
+      } else if (cleanTool === "browser_click" || cleanTool === "click") {
+        browserTarget = "localbridge_browser_click";
+        const selector = args.selector ||
+          (args.mark ? `[data-nexus-mark="${args.mark}"]` : (args.text ? `text=${args.text}` : ""));
+        if (!selector) { fail("browser_click 需要 selector（或 mark/text）参数"); return; }
+        browserArgs.selector = selector;
+        if (args.button) browserArgs.button = args.button;
+        if (args.clickCount || args.count) browserArgs.clickCount = Number(args.clickCount || args.count) || 1;
+        if (args.waitForNavigation) browserArgs.waitForNavigation = true;
+      } else if (cleanTool === "browser_type" || cleanTool === "type") {
+        browserTarget = "localbridge_browser_type";
+        const selector = args.selector || (args.mark ? `[data-nexus-mark="${args.mark}"]` : "");
+        if (!selector) { fail("browser_type 需要 selector（或 mark）参数"); return; }
+        browserArgs.selector = selector;
+        browserArgs.text = args.text ?? args.value ?? "";
+        if (args.clearFirst || args.replace) browserArgs.clearFirst = true;
+      } else if (cleanTool === "browser_snapshot" || cleanTool === "snapshot") {
+        browserTarget = "localbridge_browser_snapshot";
+        if (args.selector) browserArgs.selector = args.selector;
+        if (args.maxDepth) browserArgs.maxDepth = Number(args.maxDepth) || 5;
+      } else if (cleanTool === "browser_screenshot") {
+        browserTarget = "localbridge_browser_screenshot";
+        if (args.selector) browserArgs.selector = args.selector;
+        if (args.fullPage || args.full_page) browserArgs.fullPage = true;
+        if (args.format) browserArgs.format = args.format;
+        if (args.quality !== undefined) browserArgs.quality = Number(args.quality);
+      } else if (cleanTool === "browser_launch") {
+        browserTarget = "localbridge_browser_launch";
+        browserArgs.headless = args.headless === true;
+      } else if ([
+        "browser_close", "browser_back", "browser_forward", "browser_reload", "browser_wait",
+        "browser_tabs", "browser_list", "browser_status", "browser_find", "browser_extract",
+        "browser_element_state", "browser_hover", "browser_select", "browser_upload",
+        "browser_download", "browser_console", "browser_network", "browser_cookies",
+        "browser_storage", "browser_tab_create", "browser_tab_switch", "browser_tab_close"
+      ].includes(cleanTool)) {
+        browserTarget = "localbridge_" + cleanTool;
+        Object.assign(browserArgs, args);
+        delete browserArgs.mark;
+      } else {
+        // browser_navigate 等剩余别名按导航处理
+        browserTarget = "localbridge_browser_open";
+        const url = (args.url || args.link || args.href || "").trim();
+        if (!url) { fail("browser_navigate 需要 url 参数"); return; }
+        browserArgs.url = url;
+      }
+      if (args.browserSessionId) browserArgs.browserSessionId = args.browserSessionId;
+      const sendBrowserAction = () => {
+        mcpToolName = "nexus_execute_action";
+        mcpArgs = { tool: browserTarget, arguments: browserArgs };
+        sendToNexusControlCenter();
+      };
+      if (browserTarget === "localbridge_browser_launch" ||
+          browserTarget === "localbridge_browser_list" ||
+          browserArgs.browserSessionId) {
+        sendBrowserAction();
+      } else {
+        ensureBrowserSession((sid, error) => {
+          if (error) { fail(error); return; }
+          if (sid) browserArgs.browserSessionId = sid;
+          sendBrowserAction();
+        });
+      }
+      return;
     } else if (toolName.startsWith("localbridge_")) {
-      // 7. 自动桥接 Nexus 344 个底层原子工程工具 (通过 nexus_execute_action 执行)
+      // 7. 自动桥接 Nexus 底层原子工程工具 (通过 nexus_execute_action 执行)
       mcpToolName = "nexus_execute_action";
       mcpArgs = {
         tool: toolName,
         arguments: args,
       };
+      if (toolName.startsWith("localbridge_browser_") &&
+          toolName !== "localbridge_browser_launch" &&
+          toolName !== "localbridge_browser_list" &&
+          !args.browserSessionId) {
+        ensureBrowserSession((sid, error) => {
+          if (error) { fail(error); return; }
+          if (sid) mcpArgs.arguments.browserSessionId = sid;
+          sendToNexusControlCenter();
+        });
+        return;
+      }
     } else {
       // 8. 原生顶层 MCP 元工具或外部接入的 MCP 工具 (如 nexus_discover_tools, sqlite_query, github 等)
       mcpToolName = toolName;
       mcpArgs = args;
+    }
+
+    function ensureBrowserSession(cb) {
+      const rpcCall = (name, rpcArgs) => new Promise((resolve) => {
+        GM_xmlhttpRequest({
+          method: "POST",
+          url: `${CONFIG.nexusUrl}/mcp`,
+          headers: Object.assign({
+            "Content-Type": "application/json",
+            "MCP-Protocol-Version": "2024-11-05",
+          }, token ? { "Authorization": `Bearer ${token}` } : {}),
+          data: JSON.stringify({
+            jsonrpc: "2.0",
+            id: Date.now(),
+            method: "tools/call",
+            params: { name, arguments: rpcArgs },
+          }),
+          timeout: 35000,
+          onload: (res) => {
+            try { resolve(JSON.parse(res.responseText)); }
+            catch (e) { resolve({ error: { message: `JSON 解析异常: ${e.message}` } }); }
+          },
+          onerror: (err) => resolve({ error: { message: `网络或服务不可达: ${err}` } }),
+          ontimeout: () => resolve({ error: { message: "调用本地 WebAgent 35秒超时" } }),
+        });
+      });
+      const unwrap = (resp) => {
+        if (!resp || resp.error) throw new Error(resp?.error?.message || "MCP 调用失败");
+        if (resp.result?.isError) {
+          const text = (resp.result.content || []).map((c) => c.text || "").join("\n");
+          throw new Error(text || "MCP 工具返回执行错误");
+        }
+        const sc = resp.result?.structuredContent;
+        for (const candidate of [sc, sc?.structuredContent, resp.result]) {
+          if (candidate && (candidate.sessions || candidate.browserSessionId || candidate.session)) return candidate;
+        }
+        const text = (resp.result?.content || []).map((c) => c.text || "").join("\n");
+        try { return JSON.parse(text); } catch { return sc || null; }
+      };
+      (async () => {
+        try {
+          const listData = unwrap(await rpcCall("nexus_execute_action", { tool: "localbridge_browser_list", arguments: {} }));
+          const ready = (listData?.sessions || []).find((s) => s.status === "ready" || s.status === "active");
+          if (ready?.browserSessionId) return cb(ready.browserSessionId);
+          const launchData = unwrap(await rpcCall("nexus_execute_action", { tool: "localbridge_browser_launch", arguments: { headless: false } }));
+          const sid = launchData?.browserSessionId || launchData?.session?.browserSessionId || (launchData?.sessions || [])[0]?.browserSessionId;
+          if (sid) return cb(sid);
+          cb(null, "无法定位或创建浏览器会话，请先调用 localbridge_browser_launch。");
+        } catch (e) {
+          cb(null, e.message || String(e));
+        }
+      })();
     }
 
     function sendToNexusControlCenter() {
